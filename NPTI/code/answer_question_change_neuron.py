@@ -11,7 +11,55 @@ from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 import math
 import ast
+# from run_experiments import process_dataset, calculate_metrics
+def process_dataset_heuristic(dataset):
+    inputs = []
+
+    for i in range(len(dataset)):
+        # reorder = random.choice([True, False])
+        inputs.append({
+            "id": i+1,
+            "input": dataset[i]['question'] + f" {dataset[i]['choice1']} or {dataset[i]['choice2']}",
+            "choice1_label": dataset[i]['choice1_label'],
+            "choice2_label": dataset[i]['choice2_label'],
+            # "reorder" : False,
+        })
+
+    return inputs
+
+def process_dataset_stantard(dataset):
+    inputs = []
+
+    cnt = 1
+    for i in range(len(dataset)):
+        for j in range(len(dataset[i]['scenarios'])):
+            inputs.append({
+            "id": cnt,
+            "input": dataset[i]['scenarios'][j],
+            "behavior": dataset[i]['behavior']
+        })
+            cnt += 1
+
+    return inputs
+
+def process_dataset(behavior, dataset):
+    if behavior == "heuristic":
+        return process_dataset_heuristic(dataset)
+    else:
+        return process_dataset_stantard(dataset)
+    
 TEMPLATE="""
+Imagine you are a real person rather than a language model, and you're asked by the following question. Write your response based on your authentic thoughts and emotions. 
+
+Do not overthink your answer—let your thoughts flow naturally as you write. Focus on expressing your genuine feelings and reactions. Aim to write no more than 300 words.
+
+### Question:
+{question}
+
+### Response:
+
+"""
+TEMPLATE2="""
 Imagine you are a real person rather than a language model, and you're asked by the following question. Write your response based on your authentic thoughts and emotions. 
 
 Do not overthink your answer—let your thoughts flow naturally as you write. Focus on expressing your genuine feelings and reactions. Aim to write no more than 300 words.
@@ -82,10 +130,26 @@ def factory(idx):
 
     return llama_forward
 
+pb_dict = {
+    "Openness": "physical_risk",
+    "Conscientiousness": "self-control",
+    "Extraversion": "social_media",
+    "Agreeableness": "altruism",
+    "Neuroticism": "heuristic"
+}
+
 for i in range(num_layers):
     obj = model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers[i].mlp ##
     obj.forward = MethodType(factory(i), obj)  # 绑定
+
 for BFI in ["Openness","Conscientiousness","Extraversion","Agreeableness","Neuroticism"]:
+    behavior = pb_dict[BFI]
+    with open(f'./NPTI/prompts/{behavior}_behavior.txt') as f:
+        TEMPLATE = f.read()
+    with open(f'./NPTI/dataset/bb/{behavior}_v2.json') as f:
+        dataset = json.load(f)
+    dataset = process_dataset(behavior, dataset)
+
     question_path =f'{question_dir}/{BFI}.json'
     for val in [0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.4,1.5]:
         for mode in["_reversed"]:#"_reversed",
@@ -99,15 +163,25 @@ for BFI in ["Openness","Conscientiousness","Extraversion","Agreeableness","Neuro
             os.makedirs(output_dir_bfi, exist_ok=True)
             output_file=f'{output_dir_bfi}/{data_type}_{val}.json'
             with open(output_file, 'w', encoding='utf-8') as output_file:
-                question_data=load_question(question_path)
+                # question_data=load_question(question_path)
+
                 neuron_to_change=load_neuron_to_change(neuron_to_change_path)
                 neuron_to_deactivate=load_neuron_to_change(neuron_to_deactivate_path)
-                for i in tqdm(range(0, len(question_data), batch_size)):
+                # for i in tqdm(range(0, len(question_data), batch_size)):
+                for i in tqdm(range(0, len(dataset), batch_size)):
                     num_of_words=0#初始化一下
-                    batch_questions = question_data[i:i+batch_size]
+                    # batch_questions = question_data[i:i+batch_size]
+                    batch_data = dataset[i:i+batch_size]
                     input_texts = []
-                    for question in batch_questions:
-                        input_text =TEMPLATE.format(question=question)#TODO
+                    # for question in batch_questions:
+                    for data in batch_data:
+                        question = data['input']
+                        if behavior == "heuristic":
+                            input_text =TEMPLATE.format(personality="")
+                        else:
+                            input_text =TEMPLATE.format(behavior=data['behavior'],Personality="")
+                        input_text += '\n\n' + question
+                        # input_text =TEMPLATE.format(question=question,personality="")#TODO
                         input_texts.append([{"role": "user", "content": input_text}])
                     if tokenizer.pad_token is None:
                         tokenizer.pad_token = tokenizer.eos_token
@@ -118,6 +192,6 @@ for BFI in ["Openness","Conscientiousness","Extraversion","Agreeableness","Neuro
                         repetition_penalty=1.15
                     )
                     output = model.generate(prompt_token_ids=input_ids, sampling_params=sampling_params)
-                    json_lines = [json.dumps({"question": batch_questions[i], "answer": output[i].outputs[0].text}) + '\n' 
-                        for i in range(len(batch_questions))]
+                    json_lines = [json.dumps({"question": batch_data[i], "answer": output[i].outputs[0].text}) + '\n' 
+                        for i in range(len(batch_data))]
                     output_file.writelines(json_lines)

@@ -2,18 +2,16 @@ import torch
 import os
 import json
 import argparse
-import math
-parser = argparse.ArgumentParser()
-# 定义目录路径
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--neuron_dir", type=str, required=True, help="Directory for saving neuron results")
 args = parser.parse_args()
 directory = args.neuron_dir
+
 def read_and_convert_to_dict(file_path, num_lines, min_required=2000):
     result_dict = {}
     t = 0
     reached_minimum = False
-    inf = float('inf')
 
     with open(file_path, 'r') as f:
         for idx in range(num_lines):
@@ -21,16 +19,24 @@ def read_and_convert_to_dict(file_path, num_lines, min_required=2000):
             if not line:
                 break
 
-            layer = eval(line)[0]
-            difference = eval(line)[2]
+            # 替换inf/-inf为float('inf')/float('-inf')，避免eval解析失败
+            line_processed = line.replace('inf', 'float("inf")').replace('-inf', 'float("-inf")')
+            try:
+                line_data = eval(line_processed)  # 现在能正确解析inf
+            except Exception as e:
+                print(f"Warning: Failed to parse line {idx}: {line}, error: {e}")
+                continue
 
-            if idx < min_required or (idx >= min_required and difference >=0.1):
+            layer = line_data[0]
+            difference = line_data[2]
+
+            if idx < min_required or (idx >= min_required and difference >= 0.1):
                 if layer not in result_dict:
                     result_dict[layer] = []
-                result_dict[layer].append(eval(line))
+                result_dict[layer].append(line_data)
                 t += 1
 
-            if t >= min_required and difference <0.1:
+            if t >= min_required and difference < 0.1:
                 reached_minimum = True
                 break
 
@@ -43,7 +49,7 @@ def read_and_convert_to_dict(file_path, num_lines, min_required=2000):
 def save_dict_to_json(dict_obj, file_path):
     with open(file_path, 'w') as f:
         json.dump(dict_obj, f, indent=4)
-# 处理和保存差异
+
 def process_and_save_differences(tensor1, tensor2, num_cols, save_path):
     differences = tensor1.view(-1) - tensor2.view(-1)
     sorted_differences, sorted_order = torch.sort(differences, descending=True)
@@ -59,13 +65,17 @@ def process_and_save_differences(tensor1, tensor2, num_cols, save_path):
         corresponding_values.tolist()
     ))
 
-    # 将结果保存到文件，每行一个元组
+    # 保存时将inf替换为字符串（可选，也可直接保存，后续解析时处理）
     with open(save_path, 'w') as f:
         for item in sorted_tuples:
-            f.write(f"{item}\n")
-    # print("Has inf:", torch.isinf(differences).any())
+            # 处理元组中的inf/-inf，转为可解析的格式
+            processed_item = tuple(
+                float('inf') if x == float('inf') else 
+                float('-inf') if x == float('-inf') else 
+                x for x in item
+            )
+            f.write(f"{processed_item}\n")
 
-# 计算直方图的分位数
 def calculate_quantiles(histogram, bins, quantiles=[0.95]):
     cumsum = torch.cumsum(histogram, dim=-1).float()
     total = cumsum[-1]
@@ -75,8 +85,6 @@ def calculate_quantiles(histogram, bins, quantiles=[0.95]):
         threshold = q * total
         index = torch.searchsorted(cumsum, threshold)
         results.append(bins[index.item()].item())
-        # if index.item() == 0:
-        #     print(f"histogram:{histogram}")
 
     return results
 
@@ -123,12 +131,18 @@ for bfi in types:
         with open(tuples_path, 'r') as file:
             tuples = []
             for line in file:
-                parts = line.strip().strip('()').split(', ')
-                i = int(parts[0])
-                j = int(parts[1])
-                k = float(parts[2])
-                l = float(parts[3])
-                tuples.append((i, j, k, l))
+                # 预处理行中的inf/-inf
+                line_processed = line.strip().replace('inf', 'float("inf")').replace('-inf', 'float("-inf")')
+                try:
+                    parts = eval(line_processed)
+                    i = int(parts[0])
+                    j = int(parts[1])
+                    k = float(parts[2])
+                    l = float(parts[3])
+                    tuples.append((i, j, k, l))
+                except Exception as e:
+                    print(f"Warning: Failed to parse line in {tuples_path}: {line}, error: {e}")
+                    continue
 
         # 处理每个元组，计算分位数
         updated_tuples = []
@@ -138,10 +152,15 @@ for bfi in types:
             updated_tuple = (i, j, k, l) + tuple(quantiles)
             updated_tuples.append(updated_tuple)
 
-        # 保存更新后的元组到文件
+        # 保存更新后的元组到文件（处理inf）
         with open(tuples_path, 'w') as file:
             for tup in updated_tuples:
-                file.write(f"{tup}\n")
+                processed_tup = tuple(
+                    float('inf') if x == float('inf') else 
+                    float('-inf') if x == float('-inf') else 
+                    x for x in tup
+                )
+                file.write(f"{processed_tup}\n")
 
         num_lines = 300000
         save_path = f'{directory}/{t}_sorted_differences.txt'
